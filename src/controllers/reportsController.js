@@ -1,19 +1,14 @@
 const db = require('../config/db');
 const { tokenize } = require('../services/tokenizationService');
+const { Parser } = require('json2csv');
+const ExcelJS = require('exceljs');
 
 async function hibahSummary(req, res) {
   try {
-    // 1. Total applications
-    const [totalRows] = await db.query('SELECT COUNT(*) as total FROM doc');
-    const total_applications = totalRows[0]?.total || 0;
+    const { format = 'json' } = req.query;
 
-    // 2. Valid/incomplete hibah (assuming status '0001' = valid, others = incomplete)
-    const [validRows] = await db.query("SELECT COUNT(*) as valid FROM doc WHERE status = '0001'");
-    const valid_hibah = validRows[0]?.valid || 0;
-    const incomplete_hibah = total_applications - valid_hibah;
-
-    // 3. Donor info (customer + account number) // kategoriHarta for now sbb noAkaun tiada data
-    const [donorRows] = await db.query(`
+    // 1. Applicant info (customer + account number)
+    const [applicantRows] = await db.query(`
       SELECT c.id as customer_id, c.name, c.nric as ic,
         af.value as account_number
       FROM doc d
@@ -25,20 +20,40 @@ async function hibahSummary(req, res) {
       LIMIT 20
     `);
 
-    const donors = [];
-    for (const donor of donorRows) {
-      // Validation dates/status for this donor
+    const applicants = [];
+    for (const applicant of applicantRows) {
+      // Total applications for this applicant
+      const [totalRows] = await db.query(
+        `SELECT COUNT(*) as total FROM doc WHERE customer_id = ?`,
+        [applicant.customer_id]
+      );
+      const total_applications = totalRows[0]?.total || 0;
+
+      // Valid hibah for this applicant
+      const [validRows] = await db.query(
+        `SELECT COUNT(*) as valid FROM doc WHERE customer_id = ? AND status = '0001'`,
+        [applicant.customer_id]
+      );
+      const valid_hibah = validRows[0]?.valid || 0;
+      const incomplete_hibah = total_applications - valid_hibah;
+
+      // Validation dates/status for this applicant
       const [validationRows] = await db.query(
-        `SELECT id as doc_id, created_at as date, status FROM doc WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20`,
-        [donor.customer_id]
+        `SELECT d.id as doc_id, d.created_at as date, d.status,
+          JSON_UNQUOTE(JSON_EXTRACT(d.assets, '$[0].title')) AS title
+        FROM doc d
+        WHERE d.customer_id = ?
+        ORDER BY d.created_at DESC LIMIT 20`,
+        [applicant.customer_id]
       );
       const validation_dates = validationRows.map(row => ({
         doc_id: row.doc_id,
+        title: row.title || '',
         date: row.date,
         status: row.status
       }));
 
-      // Beneficiaries for this donor (via their assets)
+      // Beneficiaries for this applicant (via their assets)
       const [beneficiaryRows] = await db.query(`
         SELECT h.name, h.nric as ic, h.relationship, h.phone
         FROM doc d
@@ -49,7 +64,7 @@ async function hibahSummary(req, res) {
         WHERE d.customer_id = ?
         GROUP BY h.id
         LIMIT 20
-      `, [donor.customer_id]);
+      `, [applicant.customer_id]);
       const beneficiaries = beneficiaryRows.map(row => ({
         name: row.name,
         ic: row.ic ? tokenize(row.ic) : '',
@@ -57,10 +72,10 @@ async function hibahSummary(req, res) {
         phone: row.phone ? tokenize(row.phone) : ''
       }));
 
-      // Next of kin for this donor
+      // Next of kin for this applicant
       const [kinRows] = await db.query(
         `SELECT name, title, email, phone, relationship FROM customer_next_of_kin WHERE customer_id = ?`,
-        [donor.customer_id]
+        [applicant.customer_id]
       );
       const next_of_kin = kinRows.map(kin => ({
         name: kin.name,
@@ -70,24 +85,96 @@ async function hibahSummary(req, res) {
         relationship: kin.relationship
       }));
 
-      donors.push({
-        name: donor.name,
-        ic: donor.ic ? tokenize(donor.ic) : '',
-        account_number: donor.account_number || '',
+      applicants.push({
+        total_applications,
+        valid_hibah,
+        incomplete_hibah,
+        name: applicant.name,
+        ic: applicant.ic ? tokenize(applicant.ic) : '',
+        account_number: applicant.account_number || '',
         validation_dates,
         beneficiaries,
         next_of_kin
       });
     }
 
-    // Compose summary
-    const summary = {
-      total_applications,
-      valid_hibah,
-      incomplete_hibah,
-      donors
-    };
-    res.json(summary);
+    // Handle different export formats
+    if (format === 'csv') {
+      // Flatten data for CSV
+      const flattenedData = [];
+      applicants.forEach(applicant => {
+        // Main applicant data
+        const baseRow = {
+          total_applications: applicant.total_applications,
+          valid_hibah: applicant.valid_hibah,
+          incomplete_hibah: applicant.incomplete_hibah,
+          name: applicant.name,
+          ic: applicant.ic,
+          account_number: applicant.account_number
+        };
+
+        // Add validation dates
+        if (applicant.validation_dates.length > 0) {
+          applicant.validation_dates.forEach((vd, index) => {
+            const row = {
+              ...baseRow,
+              validation_doc_id: vd.doc_id,
+              validation_title: vd.title,
+              validation_date: vd.date,
+              validation_status: vd.status
+            };
+            flattenedData.push(row);
+          });
+        } else {
+          flattenedData.push(baseRow);
+        }
+      });
+
+      const parser = new Parser();
+      const csv = parser.parse(flattenedData);
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=hibah-summary.csv');
+      res.send(csv);
+    } else if (format === 'xlsx') {
+      // Create Excel workbook
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Hibah Summary');
+
+      // Add headers
+      worksheet.columns = [
+        { header: 'Total Applications', key: 'total_applications' },
+        { header: 'Valid Hibah', key: 'valid_hibah' },
+        { header: 'Incomplete Hibah', key: 'incomplete_hibah' },
+        { header: 'Name', key: 'name' },
+        { header: 'IC', key: 'ic' },
+        { header: 'Account Number', key: 'account_number' }
+      ];
+
+      // Add data
+      applicants.forEach(applicant => {
+        worksheet.addRow({
+          total_applications: applicant.total_applications,
+          valid_hibah: applicant.valid_hibah,
+          incomplete_hibah: applicant.incomplete_hibah,
+          name: applicant.name,
+          ic: applicant.ic,
+          account_number: applicant.account_number
+        });
+      });
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=hibah-summary.xlsx');
+      
+      await workbook.xlsx.write(res);
+      res.end();
+    } else {
+      // Default JSON format
+      const summary = {
+        applicants
+      };
+      res.json(summary);
+    }
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
