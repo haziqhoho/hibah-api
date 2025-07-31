@@ -1,16 +1,12 @@
-const db = require('../config/db');
+const { usrahdd, em2 } = require('../config/db');
 const { tokenize } = require('../services/tokenizationService');
 
-function transformDocument(doc) {
+// Helper to apply tokenization to sensitive fields
+function maskDocument(doc) {
   return {
     ...doc,
-    type: doc.physical === 1 ? 'physical' : 'digital',
-    hibah_type: doc.hibah_type,
-    hibah_title: doc.hibah_title,
-    physical: undefined, 
     ic: doc.ic ? tokenize(doc.ic) : '',
-    // account number tokenized later
-    account_number: doc.account_number || '',
+    account_number: doc.account_number ? tokenize(doc.account_number) : '',
     phone: doc.phone ? tokenize(doc.phone) : '',
     email: doc.email ? tokenize(doc.email) : '',
   };
@@ -35,6 +31,7 @@ async function getDocumentTracking(req, res) {
       order = 'desc',
     } = req.query;
 
+    // Build WHERE clauses and params
     let where = 'WHERE 1=1';
     const params = [];
 
@@ -88,6 +85,8 @@ async function getDocumentTracking(req, res) {
       orderBy = `doc.created_at ${order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'}`;
     }
 
+    // Main query using JSON_TABLE to join doc.assets to asset, and asset_field for account number
+    // Filter by product_id = 186 from EM2 cart_item table via asset.quotation_id
     const sql = `
       SELECT
         doc.id AS doc_id,
@@ -107,6 +106,11 @@ async function getDocumentTracking(req, res) {
       JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
       JOIN asset ON asset.id = doc_assets.asset_id
       LEFT JOIN asset_field ON asset_field.asset_id = asset.id AND asset_field.name = 'kategoriHarta'
+      JOIN (
+        SELECT DISTINCT ci.quotation_id, ci.product_id
+        FROM em2.cart_item ci
+        WHERE ci.product_id = 77
+      ) AS em2_products ON em2_products.quotation_id = asset.quotation_id
       ${where}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?
@@ -120,14 +124,19 @@ async function getDocumentTracking(req, res) {
       JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
       JOIN asset ON asset.id = doc_assets.asset_id
       LEFT JOIN asset_field ON asset_field.asset_id = asset.id AND asset_field.name = 'kategoriHarta'
+      JOIN (
+        SELECT DISTINCT ci.quotation_id, ci.product_id
+        FROM em2.cart_item ci
+        WHERE ci.product_id = 77
+      ) AS em2_products ON em2_products.quotation_id = asset.quotation_id
       ${where}
     `;
 
-    const [rows] = await db.query(sql, sqlParams);
-    const [countRows] = await db.query(countSql, params);
+    const [rows] = await usrahdd.query(sql, sqlParams);
+    const [countRows] = await usrahdd.query(countSql, params);
     const total = countRows[0]?.total || 0;
 
-    const data = rows.map(transformDocument);
+    const data = rows.map(maskDocument);
 
     res.json({
       page: Number(page),

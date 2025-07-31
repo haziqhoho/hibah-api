@@ -1,4 +1,4 @@
-const db = require('../config/db');
+const { usrahdd, em2 } = require('../config/db');
 const { tokenize } = require('../services/tokenizationService');
 const { Parser } = require('json2csv');
 const ExcelJS = require('exceljs');
@@ -7,8 +7,8 @@ async function hibahSummary(req, res) {
   try {
     const { format = 'json' } = req.query;
 
-    // 1. Applicant info (customer + account number)
-    const [applicantRows] = await db.query(`
+    // 1. Applicant info (customer + account number) - Filter by product_id = 77
+    const [applicantRows] = await usrahdd.query(`
       SELECT c.id as customer_id, c.name, c.nric as ic,
         af.value as account_number
       FROM doc d
@@ -16,32 +16,62 @@ async function hibahSummary(req, res) {
       JOIN JSON_TABLE(d.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
       JOIN asset a ON a.id = doc_assets.asset_id
       LEFT JOIN asset_field af ON af.asset_id = a.id AND af.name = 'kategoriHarta'
+      JOIN (
+        SELECT DISTINCT ci.quotation_id, ci.product_id
+        FROM em2.cart_item ci
+        WHERE ci.product_id = 77
+      ) AS em2_products ON em2_products.quotation_id = a.quotation_id
       GROUP BY c.id, af.value
       LIMIT 20
     `);
 
     const applicants = [];
     for (const applicant of applicantRows) {
-      // Total applications for this applicant
-      const [totalRows] = await db.query(
-        `SELECT COUNT(*) as total FROM doc WHERE customer_id = ?`,
+      // Total applications for this applicant - Filter by product_id = 77
+      const [totalRows] = await usrahdd.query(
+        `SELECT COUNT(*) as total 
+         FROM doc d
+         JOIN JSON_TABLE(d.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+         JOIN asset a ON a.id = doc_assets.asset_id
+         JOIN (
+           SELECT DISTINCT ci.quotation_id, ci.product_id
+           FROM em2.cart_item ci
+           WHERE ci.product_id = 77
+         ) AS em2_products ON em2_products.quotation_id = a.quotation_id
+         WHERE d.customer_id = ?`,
         [applicant.customer_id]
       );
       const total_applications = totalRows[0]?.total || 0;
 
-      // Valid hibah for this applicant
-      const [validRows] = await db.query(
-        `SELECT COUNT(*) as valid FROM doc WHERE customer_id = ? AND status = '0001'`,
+      // Valid hibah for this applicant - Filter by product_id = 77
+      const [validRows] = await usrahdd.query(
+        `SELECT COUNT(*) as valid 
+         FROM doc d
+         JOIN JSON_TABLE(d.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+         JOIN asset a ON a.id = doc_assets.asset_id
+         JOIN (
+           SELECT DISTINCT ci.quotation_id, ci.product_id
+           FROM em2.cart_item ci
+           WHERE ci.product_id = 77
+         ) AS em2_products ON em2_products.quotation_id = a.quotation_id
+         WHERE d.customer_id = ? AND d.status = '0001'`,
         [applicant.customer_id]
       );
       const valid_hibah = validRows[0]?.valid || 0;
       const incomplete_hibah = total_applications - valid_hibah;
 
-      // Validation dates/status for this applicant
-      const [validationRows] = await db.query(
+      // Validation dates/status for this applicant - Filter by product_id = 77
+      const [validationRows] = await usrahdd.query(
         `SELECT d.id as doc_id, d.created_at as date, d.status,
           JSON_UNQUOTE(JSON_EXTRACT(d.assets, '$[0].title')) AS title
         FROM doc d
+        JOIN JSON_TABLE(d.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+        JOIN asset a ON a.id = doc_assets.asset_id
+        JOIN (
+          SELECT DISTINCT ci.quotation_id, ci.product_id
+          FROM em2.cart_item ci
+          WHERE ci.product_id = 77
+        ) AS em2_products ON em2_products.quotation_id = a.quotation_id
         WHERE d.customer_id = ?
         ORDER BY d.created_at DESC LIMIT 20`,
         [applicant.customer_id]
@@ -53,14 +83,19 @@ async function hibahSummary(req, res) {
         status: row.status
       }));
 
-      // Beneficiaries for this applicant (via their assets)
-      const [beneficiaryRows] = await db.query(`
+      // Beneficiaries for this applicant (via their assets) - Filter by product_id = 77
+      const [beneficiaryRows] = await usrahdd.query(`
         SELECT h.name, h.nric as ic, h.relationship, h.phone
         FROM doc d
         JOIN JSON_TABLE(d.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
         JOIN asset a ON a.id = doc_assets.asset_id
         JOIN asset_allocation aa ON aa.asset_id = a.id
         JOIN heir h ON h.id = aa.heir_id
+        JOIN (
+          SELECT DISTINCT ci.quotation_id, ci.product_id
+          FROM em2.cart_item ci
+          WHERE ci.product_id = 77
+        ) AS em2_products ON em2_products.quotation_id = a.quotation_id
         WHERE d.customer_id = ?
         GROUP BY h.id
         LIMIT 20
@@ -73,7 +108,7 @@ async function hibahSummary(req, res) {
       }));
 
       // Next of kin for this applicant
-      const [kinRows] = await db.query(
+      const [kinRows] = await usrahdd.query(
         `SELECT name, title, email, phone, relationship FROM customer_next_of_kin WHERE customer_id = ?`,
         [applicant.customer_id]
       );
