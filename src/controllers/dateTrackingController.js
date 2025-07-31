@@ -113,15 +113,26 @@ async function getPaymentDates(req, res) {
 //date-tracking/akad?dateType=monthly
 async function getAkadDates(req, res) {
   try {
-    const { dateType = 'monthly', dateFrom, dateTo, product_id = 100 } = req.query;
+    const { dateType = 'monthly', dateFrom, dateTo, product_id = 46 } = req.query;
     const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo, 'doc');
+    
+    // First, let's check what document names exist for this product_id
+    const debugSql = `
+      SELECT DISTINCT doc.name, doc.status, doc.created_at
+      FROM doc
+      JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+      JOIN asset a ON a.id = doc_assets.asset_id
+      WHERE a.product_id = ?
+      ORDER BY doc.created_at DESC
+      LIMIT 10
+    `;
+    
+    const [debugRows] = await usrahdd.query(debugSql, [product_id]);
     
     let sql = `
       SELECT 
         ${dateFilter},
-        COUNT(*) as document_count,
-        doc.name,
-        doc.status
+        COUNT(*) as document_count
       FROM doc
       JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
       JOIN asset a ON a.id = doc_assets.asset_id
@@ -143,7 +154,11 @@ async function getAkadDates(req, res) {
       endpoint: 'akad',
       dateType,
       product_id,
-      data: rows
+      data: rows,
+      debug: {
+        available_document_names: debugRows.map(row => row.name),
+        total_documents_for_product: debugRows.length
+      }
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -154,15 +169,13 @@ async function getAkadDates(req, res) {
 //date-tracking/sia?dateType=monthly
 async function getSiaDates(req, res) {
   try {
-    const { dateType = 'monthly', dateFrom, dateTo, product_id = 100 } = req.query;
+    const { dateType = 'monthly', dateFrom, dateTo, product_id = 49 } = req.query;
     const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo, 'doc');
     
     let sql = `
       SELECT 
         ${dateFilter},
-        COUNT(*) as document_count,
-        doc.name,
-        doc.status
+        COUNT(*) as document_count
       FROM doc
       JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
       JOIN asset a ON a.id = doc_assets.asset_id
