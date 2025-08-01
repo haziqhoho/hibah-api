@@ -217,10 +217,196 @@ async function getDeathPaymentDates(req, res) {
   }
 }
 
+// Combined endpoint for frontend dashboard
+// date-tracking/dashboard?dateType=monthly&page=2&pageSize=10 for custom page
+// date-tracking/dashboard?dateType=custom&dateFrom=2024-01-01&dateTo=2024-12-31&page=1&pageSize=20 custom
+async function getCombinedDateTracking(req, res) {
+  try {
+    const { 
+      dateType = 'monthly', 
+      dateFrom, 
+      dateTo, 
+      product_id = 100,
+      product = 'SSPN',
+      page = 1,
+      pageSize = 15
+    } = req.query;
+    
+    // Get all data in parallel
+    const [registrationData, paymentData, akadData, siaData] = await Promise.all([
+      getRegistrationData(dateType, dateFrom, dateTo, product_id, page, pageSize),
+      getPaymentData(dateType, dateFrom, dateTo, product_id, page, pageSize),
+      getAkadData(dateType, dateFrom, dateTo, product_id, page, pageSize),
+      getSiaData(dateType, dateFrom, dateTo, product_id, page, pageSize)
+    ]);
+
+    // Calculate total count for pagination
+    const totalCount = registrationData.length + paymentData.length + akadData.length + siaData.length;
+
+    res.json({
+      page: parseInt(page),
+      pageSize: parseInt(pageSize),
+      total: totalCount,
+      data: {
+        registration_counts: {
+          endpoint: 'registration',
+          dateType,
+          product_id,
+          data: registrationData
+        },
+        payment_charge_counts: {
+          endpoint: 'payment',
+          dateType,
+          product_id,
+          data: paymentData
+        },
+        akad_docs: {
+          endpoint: 'akad',
+          dateType,
+          product_id,
+          data: akadData
+        },
+        sia_docs: {
+          endpoint: 'sia',
+          dateType,
+          product_id,
+          data: siaData
+        },
+        death_payment: {
+          endpoint: 'death-payment',
+          message: 'Feature not yet implemented. Will be triggered by customer death.',
+          data: []
+        }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+}
+
+// Helper functions to get individual data
+async function getRegistrationData(dateType, dateFrom, dateTo, product_id, page = 1, pageSize = 15) {
+  const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo);
+  
+  const limit = parseInt(pageSize, 10) || 15;
+  const offset = ((parseInt(page, 10) || 1) - 1) * limit;
+  
+  let sql = `
+    SELECT 
+      ${dateFilter},
+      COUNT(DISTINCT customer_id) as customer_count
+    FROM asset 
+    WHERE product_id = ?
+  `;
+  
+  const params = [product_id];
+  
+  if (dateFrom && dateTo && dateType === 'custom') {
+    sql += ' AND created_at BETWEEN ? AND ?';
+    params.push(dateFrom, dateTo);
+  }
+  
+  sql += ` ${groupBy} LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  
+  const [rows] = await usrahdd.query(sql, params);
+  return rows;
+}
+
+async function getPaymentData(dateType, dateFrom, dateTo, product_id, page = 1, pageSize = 15) {
+  const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo, 'q');
+  
+  const limit = parseInt(pageSize, 10) || 15;
+  const offset = ((parseInt(page, 10) || 1) - 1) * limit;
+  
+  let sql = `
+    SELECT 
+      ${dateFilter},
+      COUNT(DISTINCT q.id) as quotation_count
+    FROM quotation q
+    JOIN cart_item ci ON ci.quotation_id = q.id
+    WHERE ci.product_id = ? AND q.status = '0024'
+  `;
+  
+  const params = [product_id];
+  
+  if (dateFrom && dateTo && dateType === 'custom') {
+    sql += ' AND q.closed_at BETWEEN ? AND ?';
+    params.push(dateFrom, dateTo);
+  }
+  
+  sql += ` ${groupBy} LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  
+  const [rows] = await em2.query(sql, params);
+  return rows;
+}
+
+async function getAkadData(dateType, dateFrom, dateTo, product_id, page = 1, pageSize = 15) {
+  const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo, 'doc');
+  
+  const limit = parseInt(pageSize, 10) || 15;
+  const offset = ((parseInt(page, 10) || 1) - 1) * limit;
+  
+  let sql = `
+    SELECT 
+      ${dateFilter},
+      COUNT(*) as document_count
+    FROM doc
+    JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+    JOIN asset a ON a.id = doc_assets.asset_id
+    WHERE a.product_id = ? AND (doc.name LIKE 'DPP%' OR doc.name LIKE 'DPH%')
+  `;
+  
+  const params = [product_id];
+  
+  if (dateFrom && dateTo && dateType === 'custom') {
+    sql += ' AND doc.created_at BETWEEN ? AND ?';
+    params.push(dateFrom, dateTo);
+  }
+  
+  sql += ` ${groupBy} LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  
+  const [rows] = await usrahdd.query(sql, params);
+  return rows;
+}
+
+async function getSiaData(dateType, dateFrom, dateTo, product_id, page = 1, pageSize = 15) {
+  const { dateFilter, groupBy } = buildDateFilter(dateType, dateFrom, dateTo, 'doc');
+  
+  const limit = parseInt(pageSize, 10) || 15;
+  const offset = ((parseInt(page, 10) || 1) - 1) * limit;
+  
+  let sql = `
+    SELECT 
+      ${dateFilter},
+      COUNT(*) as document_count
+    FROM doc
+    JOIN JSON_TABLE(doc.assets, '$[*]' COLUMNS(asset_id BIGINT PATH '$.id')) AS doc_assets ON 1=1
+    JOIN asset a ON a.id = doc_assets.asset_id
+    WHERE a.product_id = ? AND doc.name LIKE 'SIA%'
+  `;
+  
+  const params = [product_id];
+  
+  if (dateFrom && dateTo && dateType === 'custom') {
+    sql += ' AND doc.created_at BETWEEN ? AND ?';
+    params.push(dateFrom, dateTo);
+  }
+  
+  sql += ` ${groupBy} LIMIT ? OFFSET ?`;
+  params.push(limit, offset);
+  
+  const [rows] = await usrahdd.query(sql, params);
+  return rows;
+}
+
 module.exports = {
   getRegistrationDates,
   getPaymentDates,
   getAkadDates,
   getSiaDates,
-  getDeathPaymentDates
+  getDeathPaymentDates,
+  getCombinedDateTracking
 }; 
